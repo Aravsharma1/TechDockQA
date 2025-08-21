@@ -1,0 +1,10 @@
+{
+    "name": "Design Dock QA",
+    "description": "An agentic solution to getting familiar with Technical Documentation quicker.",
+    "version": "1.0",
+    "manifest_version": 3,
+    "action": {
+      "default_popup": "hello.html",
+      "default_icon": "hello_extensions.png"
+    }
+  }
