@@ -4,9 +4,9 @@ import re
 from typing import Dict
 import fitz  # PyMuPDF
 
-class IngestionAgent: 
+class Extractor: 
     '''
-    Owns the Ingest Workflow for one document upload. Document is getting uploaded as a PDF through the UI. 
+    Owns the Extractor workflow for one document upload. Document is getting uploaded as a PDF through the UI. 
     The IngestionAgent class: 
     (1) takes a PDF uploaded by the user, 
     (2) extracts its readable text,
