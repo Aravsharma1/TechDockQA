@@ -1,10 +1,14 @@
 from __future__ import annotations
 from typing import Callable, List
 from langchain_openai import OpenAI
+import re
+from utils import utils
+from langchain.embeddings import OpenAIEmbeddings
+oaiembeds = OpenAIEmbeddings()
 
-class EmbeddingAgent: 
+class Chunker: 
     '''
-    Constructor for the Embedding Agent. Agent that converts a PDF document to Vector embeddings. 
+    Constructor for the Chunker Class. Class that converts a PDF document to Vector embeddings. 
     (1) PDF document is converted into chunks. 
     (2) Chunks are converted into vector embeddings.
     (3) Vector embeddings are stored in a Vector Database.
@@ -27,11 +31,33 @@ class EmbeddingAgent:
         '''
         Converts PDF document into chunks using ______. 
         '''
-    
-    def _embed_chunks():
+
+        # run as a loop to scan through all pages of the document
+        file_path='' # change this - TO DO 
+        with open(file_path) as file:
+            essay = file.read()
+        
+        # split stuff from the file_path based into 1 sentence chunks
+        single_sentences_list = re.split(r'(?<=[.?!])\s+', essay)
+        print(f"{len(single_sentences_list)} senteneces were found")
+        sentences = [{'sentence': x, 'index' : i} for i, x in enumerate(single_sentences_list)]
+        sentences[:3]
+
+        # basically have a list of sentences for now, we want to combine these 
+        # sentences to reduce noise and capture the relationships between sequential sentences
+        Utils = utils()
+        sentences = Utils.combine_sentences(sentences)
+
+        return sentences
+        
+    def _embed_chunks(sentences):
         '''
         Embeds chunks using the OpenAI API. 
         '''
+        embeddings = oaiembeds.embed_documents([x['combined_sentence'] for x in sentences])
+        for i, sentence in enumerate(sentences):
+            sentence['combined_sentence_embedding'] = embeddings[i]
+
     
     def _store_embedded_chunks():
         '''
