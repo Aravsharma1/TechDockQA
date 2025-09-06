@@ -1,65 +1,130 @@
+# backend/ingest/chunker.py
 from __future__ import annotations
-from typing import Callable, List
-from langchain_openai import OpenAI
-import re
-from utils import utils
-from langchain.embeddings import OpenAIEmbeddings
-oaiembeds = OpenAIEmbeddings()
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Any, Optional
 
-class Chunker: 
-    '''
-    Constructor for the Chunker Class. Class that converts a PDF document to Vector embeddings. 
-    (1) PDF document is converted into chunks. 
-    (2) Chunks are converted into vector embeddings.
-    (3) Vector embeddings are stored in a Vector Database.
+from langchain_openai import OpenAIEmbeddings
+from langchain_experimental.text_splitter import SemanticChunker
+
+# Type for your storage embedding function
+EmbedFn = Callable[[List[str]], List[List[float]]]
+
+
+@dataclass
+class ChunkRecord:
+    id: str
+    text: str
+    metadata: Dict[str, Any]
+
+
+class Chunker:
+    """
+    1) Semantic-chunk cleaned text (no file I/O here).
+    2) Embed chunk texts with embed_fn (OpenAI or other).
+    3) Return items ready for vector-store upsert (store.py saves them).
+
     Args:
-            embed_fn: a function that takes a list of strings (chunks)
-                      and returns a list of embeddings (list of floats).
-                      e.g., wraps the OpenAI API call.
-            vector_store: the vector database client (FAISS/Chroma/etc.)
-                          must expose an upsert(doc_id, items) method.
-            chunk_size: maximum size of each chunk in characters.
-            chunk_overlap: number of characters to overlap between chunks.  
-    '''
-    def __init__(self, embed_fn, vector_store, chunk_size=1000, chunk_overlap=150):
+      embed_fn: List[str] -> List[List[float]] (your storage embeddings)
+
+      # for the chunker to work, we need to determine when to break apart
+      # the sentences: we do this by looking at the differences in the embeddings
+      # between any two sentences.
+      # when the difference is past some threshold, then they are split.
+      # this "threshold" is determined by:
+      # breakpoint_threshold_type arg, which can take in the following values:
+      # percentile, standard deviation, gradient
+
+      breakpoint_threshold_type: str
+      breakpoint_threshold_amount: int
+      splitter_model: str
+    """
+
+    def __init__(
+        self,
+        embed_fn: EmbedFn,
+        breakpoint_threshold_type: str = "percentile",
+        breakpoint_threshold_amount: int = 95,
+        splitter_model: str = "text-embedding-3-large",
+    ) -> None:
         self.embed_fn = embed_fn
-        self.vector_store = vector_store
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-    
-    def _make_chunks(self, text: str):
-        '''
-        Converts PDF document into chunks using ______. 
-        '''
 
-        # run as a loop to scan through all pages of the document
-        file_path='' # change this - TO DO 
-        with open(file_path) as file:
-            essay = file.read()
-        
-        # split stuff from the file_path based into 1 sentence chunks
-        single_sentences_list = re.split(r'(?<=[.?!])\s+', essay)
-        print(f"{len(single_sentences_list)} senteneces were found")
-        sentences = [{'sentence': x, 'index' : i} for i, x in enumerate(single_sentences_list)]
-        sentences[:3]
+        # Create the Text Splitter (SemanticChunker).
+        # for the chunker to work, we need to determine when to break apart
+        # the sentences: we do this by looking at the differences in the embeddings
+        # between any two sentences.
+        # when the difference is past some threshold, then they are split.
+        # this "threshold" is determined by:
+        # breakpoint_threshold_type arg, which can take in the following values:
+        # percentile, standard deviation, gradient
+        self.splitter = SemanticChunker(
+            OpenAIEmbeddings(model=splitter_model),
+            breakpoint_threshold_type=breakpoint_threshold_type,
+            breakpoint_threshold_amount=breakpoint_threshold_amount,
+        )
 
-        # basically have a list of sentences for now, we want to combine these 
-        # sentences to reduce noise and capture the relationships between sequential sentences
-        Utils = utils()
-        sentences = Utils.combine_sentences(sentences)
+    def process(
+        self,
+        text: str,
+        doc_id: str,
+        base_meta: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        End-to-end: text -> semantic chunks -> storage embeddings -> items for store.upsert(items)
+        Returns: [{id, text, vector, metadata}, ...]
+        """
+        base_meta = base_meta or {}
+        chunks = self._make_chunks(text=text, doc_id=doc_id, base_meta=base_meta)
+        if not chunks:
+            return []
 
-        return sentences
-        
-    def _embed_chunks(sentences):
-        '''
-        Embeds chunks using the OpenAI API. 
-        '''
-        embeddings = oaiembeds.embed_documents([x['combined_sentence'] for x in sentences])
-        for i, sentence in enumerate(sentences):
-            sentence['combined_sentence_embedding'] = embeddings[i]
+        vectors = self._embed_chunks([c.text for c in chunks])
+        if len(vectors) != len(chunks):
+            raise ValueError("Embedding count mismatch with chunk count")
 
-    
-    def _store_embedded_chunks():
-        '''
-        Stores Embedded chunks in a Vector Database. 
-        '''
+        items: List[Dict[str, Any]] = []
+        for rec, vec in zip(chunks, vectors):
+            items.append({
+                "id": rec.id,
+                "text": rec.text,
+                "vector": vec,
+                "metadata": rec.metadata,
+            })
+        return items
+
+    # ---------- internals ----------
+
+    def _make_chunks(
+        self,
+        text: str,
+        doc_id: str,
+        base_meta: Dict[str, Any],
+    ) -> List[ChunkRecord]:
+        """
+        Semantic chunking of the provided text.
+
+        # for the chunker to work, we need to determine when to break apart
+        # the sentences: we do this by looking at the differences in the embeddings
+        # between any two sentences.
+        # when the difference is past some threshold, then they are split.
+        # this "threshold" is determined by:
+        # breakpoint_threshold_type arg, which can take in the following values:
+        # percentile, standard deviation, gradient
+        """
+        if not text or not text.strip():
+            return []
+
+        docs = self.splitter.create_documents([text])  # List[Document] with .page_content, .metadata
+        out: List[ChunkRecord] = []
+        for i, d in enumerate(docs):
+            out.append(
+                ChunkRecord(
+                    id=f"{doc_id}::chunk_{i:05d}",
+                    text=d.page_content,
+                    metadata={**base_meta, "doc_id": doc_id, "chunk_index": i},
+                )
+            )
+        return out
+
+    def _embed_chunks(self, chunk_texts: List[str]) -> List[List[float]]:
+        """Create storage embeddings using your provided embed_fn."""
+        return self.embed_fn(chunk_texts)
